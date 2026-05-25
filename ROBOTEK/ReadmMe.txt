@@ -1,0 +1,150 @@
+1. Başla
+
+2. Drone bağlantısını kur
+
+3. GPS ve EKF kontrolü yap
+   → Hazır değilse görevi başlatma
+   → Hazırsa devam et
+
+4. HOME noktasını belirle
+
+5. Görev hedef listesini hazırla
+
+6. Her hedef için döngü başlat
+
+   6.1 HOME noktasından kalkış yap
+       → GUIDED moda geç
+       → ARM et
+       → hedef irtifaya yüksel
+
+   6.2 Hedef koordinata git
+       → normal hızla ilerle
+       → hedefe yaklaşınca yavaşla
+       → hedef toleransına girince varıldı kabul et
+
+   6.3 Hedef üstünde stabil ol
+       → konum hatasını kontrol et
+       → yatay hızı kontrol et
+       → belirlenen süre boyunca stabil kal
+
+   6.4 Hedef noktasına iniş yap
+       → kademeli kontrollü alçal
+       → yere yaklaşınca LAND moduna geç
+       → DISARM olmasını bekle
+
+   6.5 İniş sonrası bekle
+       → gerekli süre kadar yerde sabit kal
+
+   6.6 Tekrar kalkış yap
+       → GUIDED moda geç
+       → ARM et
+       → hedef irtifaya yüksel
+
+   6.7 HOME koordinatına dön
+       → normal hızla ilerle
+       → HOME’a yaklaşınca yavaşla
+       → HOME toleransına girince varıldı kabul et
+
+   6.8 HOME üstünde stabil ol
+       → konum hatasını kontrol et
+       → yatay hızı kontrol et
+       → belirlenen süre boyunca stabil kal
+
+   6.9 HOME noktasına iniş yap
+       → kademeli kontrollü alçal
+       → yere yaklaşınca LAND moduna geç
+       → DISARM olmasını bekle
+
+   6.10 Hedef başarılı sayısını artır
+
+   6.11 Sıradaki hedefe geç
+
+7. Tüm hedefler tamamlandıysa görevi bitir
+
+8. Bağlantıyı kapat
+
+9. Bitir
+
+--------- KULLANILAN / KONTROL EDİLEN PARAMETRELER ---------
+
+param show FS_GCS_ENABLE
+param show FS_THR_ENABLE
+param show FENCE_ENABLE
+param show FENCE_TYPE
+param show FENCE_RADIUS
+param show FENCE_ALT_MAX
+param show FENCE_ACTION
+param show RTL_ALT_M
+param show WP_YAW_BEHAVIOR
+param show WPNAV_ACCEL
+param show WPNAV_ACCEL_Z
+param show BATT_LOW_VOLT
+param show BATT_FS_LOW_ACT
+param show BATT_CRT_VOLT
+param show BATT_FS_CRT_ACT
+
+
+--------------- PARAMETRE DEĞERLERİ -------------------
+
+FS_GCS_ENABLE     1.0
+FS_THR_ENABLE     1.0
+
+FENCE_ENABLE      1.0
+FENCE_TYPE        3.0
+FENCE_RADIUS      80.0
+FENCE_ALT_MAX     20.0
+FENCE_ACTION      1.0
+
+RTL_ALT_M         7.0
+WP_YAW_BEHAVIOR   0.0
+
+WPNAV_ACCEL       100.0
+WPNAV_ACCEL_Z     100.0
+
+// batarya kısmı :
+BATT_LOW_VOLT     10.5
+BATT_FS_LOW_ACT   0.0
+BATT_CRT_VOLT     0.0
+BATT_FS_CRT_ACT   0.0
+
+--------------- PARAMETRE AÇIKLAMALARI ----------------------
+
+FS_GCS_ENABLE = 1
+MAVLink/GCS bağlantısı kesilirse failsafe aktif olur.
+
+FS_THR_ENABLE = 1
+Kumanda/radio failsafe aktiftir.
+
+FENCE_ENABLE = 1
+Geofence aktiftir.
+
+FENCE_TYPE = 3
+Dairesel alan sınırı + maksimum irtifa sınırı kullanılır.
+
+FENCE_RADIUS = 80
+Home merkezli 80 metre yatay sınır uygulanır.
+
+FENCE_ALT_MAX = 20
+Maksimum 20 metre irtifa sınırı uygulanır.
+
+FENCE_ACTION = 1
+Fence ihlalinde güvenli aksiyon uygulanır.
+
+RTL_ALT_M = 7
+RTL durumunda dönüş irtifası 7 metredir.
+
+WP_YAW_BEHAVIOR = 0
+Waypoint/hedef uçuşlarında otomatik yaw dönüşü kapalıdır.
+
+WPNAV_ACCEL = 100
+Yatay waypoint navigasyon ivmesi ayarıdır.
+
+WPNAV_ACCEL_Z = 100
+Dikey waypoint navigasyon ivmesi ayarıdır.
+
+BATT_FS_LOW_ACT = 0
+Batarya düşük failsafe şu an kapalıdır.
+
+BATT_FS_CRT_ACT = 0
+Kritik batarya failsafe şu an kapalıdır.
+

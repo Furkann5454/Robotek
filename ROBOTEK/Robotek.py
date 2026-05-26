@@ -183,12 +183,12 @@ def arm_ve_takeoff(vehicle, hedef_yukseklik, home_noktasi=None):  # GUIDED moda 
             f"ARM: {vehicle.armed}"
         )
 
-        if yukseklik >= hedef_yukseklik * 0.90:
+        if yukseklik >= hedef_yukseklik * 0.80:
             print("Hedef yukseklige yeterince ulasildi...")
             return True
 
         if time.time() - baslangic_zamani > 30:
-            if yukseklik >= hedef_yukseklik * 0.85:
+            if yukseklik >= hedef_yukseklik * 0.75:
                 print("Drone hedef yukseklige yeterince yaklasti. Goreve devam ediliyor...")
                 return True
 
@@ -420,7 +420,7 @@ def zorla_disarm(vehicle):  # yerdeyken ayara bağlı olarak MAVLink disarm komu
     )
 
     vehicle.send_mavlink(msg)
-
+    vehicle.flush()
 
 def land_ol(vehicle, zaman_asimi=40):  # simple_goto ile kademeli iniş yapar ve son aşamada LAND moduna geçer
     print("Inis basliyor...")
@@ -515,15 +515,22 @@ def land_ol(vehicle, zaman_asimi=40):  # simple_goto ile kademeli iniş yapar ve
         print("LAND mod bekleniyor...")
         time.sleep(0.2)
 
-    sifir_irtifa_baslangic = None
+    yerde_baslangic = None
     land_baslangic = time.time()
+    disarm_gonderildi = False
+    disarm_gonderim_zamani = None
 
     while True:
         yukseklik = vehicle.location.global_relative_frame.alt
+        hiz = vehicle.groundspeed
+
+        if hiz is None:
+            hiz = 0
 
         print(
             f"LAND son asama | "
             f"Yukseklik: {yukseklik:.2f} m | "
+            f"Hiz: {hiz:.2f} m/s | "
             f"ARM: {vehicle.armed} | "
             f"Mod: {vehicle.mode.name}"
         )
@@ -532,21 +539,31 @@ def land_ol(vehicle, zaman_asimi=40):  # simple_goto ile kademeli iniş yapar ve
             print("Drone indi ve DISARM oldu.")
             return True
 
-        if yukseklik <= 0.20:
-            if sifir_irtifa_baslangic is None:
-                sifir_irtifa_baslangic = time.time()
+        yerde_gibi = yukseklik <= 0.30 and hiz <= 0.25
 
-            if time.time() - sifir_irtifa_baslangic > 0.6:
-                print("Drone yerde. Hizli DISARM deneniyor...")
+        if yerde_gibi:
+            if yerde_baslangic is None:
+                yerde_baslangic = time.time()
+
+            if time.time() - yerde_baslangic > 0.8 and not disarm_gonderildi:
+                print("Drone yerde kabul edildi. Hizli DISARM deneniyor...")
                 zorla_disarm(vehicle)
+                disarm_gonderildi = True
+                disarm_gonderim_zamani = time.time()
         else:
-            sifir_irtifa_baslangic = None
+            yerde_baslangic = None
 
-        if time.time() - land_baslangic > 15:
+        if disarm_gonderildi and time.time() - disarm_gonderim_zamani > 5:
+            print("DISARM komutu sonrasi tekrar deneniyor...")
+            zorla_disarm(vehicle)
+            disarm_gonderim_zamani = time.time()
+
+        if time.time() - land_baslangic > 20:
             print("LAND son asama zaman asimina girdi.")
             return False
 
         time.sleep(0.2)
+
 
 def inis_sonrasi_bekle(sure, nokta_adi):  # inişten sonra ayarlanan süre kadar yerde bekler
     if sure <= 0:

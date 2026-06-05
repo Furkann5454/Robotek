@@ -3,58 +3,55 @@ import time
 import math
 from pymavlink import mavutil
 
-BAGLANTI_ADRESI = "udp:127.0.0.1:14550"
+# Bağlantı
+BAGLANTI_ADRESI = "tcp:192.168.30.3:5760"
 
-HEDEF_YUKSEKLIK = 5
-HEDEF_MESAFE = 1.0
-STABIL_MESAFE = 0.8
-STABIL_HIZ = 0.4
-STABIL_SURE = 1.5
+# Görev genel ayarları
+HEDEF_YUKSEKLIK = 10          # Görev uçuş irtifası
+HEDEF_MESAFE = 1.2            # Hedefe varıldı kabul edilen mesafe
+INIS_SONRASI_BEKLEME = 0      # İnişten sonra yerde bekleme süresi
 
-NORMAL_HIZ = 3
-YAVAS_HIZ = 1
-YAVASLAMA_MESAFESI = 5
+# Stabilizasyon ayarları
+STABIL_MESAFE = 1.2           # İniş öncesi hedef üstü kabul mesafesi
+STABIL_HIZ = 0.4              # İniş öncesi maksimum yatay hız
+STABIL_SURE = 1.0             # Stabil kalması gereken süre
 
-INIS_SONRASI_BEKLEME = 0
+# Hız ayarları
+NORMAL_HIZ = 3                # Hedefe giderken normal hız
+YAVAS_HIZ = 1                 # Hedefe yaklaşınca yavaş hız
+YAVASLAMA_MESAFESI = 5        # Bu mesafede yavaş moda geçer
 
-FORCE_DISARM_AKTIF = True
-WATCHDOG_AKTIF = True
-BATARYA_KONTROL_AKTIF = False
-RTL_KULLAN = True
+# İniş ayarları
+WPNAV_INIS_HIZI = 100         # cm/s, 100 = 1 m/s
 
-MAKS_HOME_MESAFESI = 80
-MAKS_IRTIFA = 20
-MIN_BATARYA_VOLTAJ = 14.4
+# Failsafe ayarları
+WATCHDOG_AKTIF = True         # Yazılımsal güvenlik kontrolleri
+BATARYA_KONTROL_AKTIF = False # Batarya kontrolü
+RTL_KULLAN = True             # Uygunsa RTL kullan
+MAKS_HOME_MESAFESI = 80       # Home'dan maksimum uzaklık
+MAKS_IRTIFA = 20              # Maksimum izinli irtifa
+MIN_BATARYA_VOLTAJ = 14.4     # Batarya kontrolü açıksa alt voltaj sınırı
 
+# Home noktası
 HOME_NOKTASI = {
     "isim": "Home",
-    "lat": -35.36349560,
-    "lon": 149.16502250
+    "lat": 40.74439665,
+    "lon": 30.33822099
 }
 
+# Görev hedefleri
 GOREV_NOKTALARI = [
     {
         "isim": "Hedef_1",
-        "lat": -35.36330975,
-        "lon": 149.16497537
+        "lat": 40.74447755,
+        "lon": 30.33819661
     },
     {
         "isim": "Hedef_2",
-        "lat": -35.36334285,
-        "lon": 149.16512807
-    },
-    {
-        "isim": "Hedef_3",
-        "lat": -35.36344066,
-        "lon": 149.16528338
-    },
-    {
-        "isim": "Hedef_4",
-        "lat": -35.36363817,
-        "lon": 149.16507210
+        "lat": 40.74430471,
+        "lon": 30.33823617
     }
 ]
-
 
 def mesafe_hesapla_metre(konum1, konum2):  # iki GPS konumu arasındaki mesafeyi metre cinsinden hesaplar
     dlat = konum2.lat - konum1.lat
@@ -91,14 +88,46 @@ def konum_hazir_mi(vehicle):  # GPS ve EKF verisi hazır olana kadar bekler
             print("GPS ve EKF hazir.")
             return True
 
-        if time.time() - baslangic_zamani > 30:
+        if time.time() - baslangic_zamani > 120:
             print("GPS veya EKF hazir olmadi.")
             return False
 
         time.sleep(1)
 
 
-def arm_ve_takeoff(vehicle, hedef_yukseklik):  # GUIDED moda geçer, ARM eder ve kalkış yapar
+def ardupilot_home_ayarla(vehicle, home_noktasi):  # ArduPilot iç home noktasını ana home koordinatına ayarlar
+    home_alt = home_noktasi.get("alt", None)
+
+    if home_alt is None:
+        home_alt = vehicle.location.global_frame.alt
+
+    if home_alt is None:
+        home_alt = 0
+
+    msg = vehicle.message_factory.command_long_encode(
+        0,
+        0,
+        mavutil.mavlink.MAV_CMD_DO_SET_HOME,
+        0,
+        0,
+        0,
+        0,
+        0,
+        home_noktasi["lat"],
+        home_noktasi["lon"],
+        home_alt
+    )
+
+    vehicle.send_mavlink(msg)
+    vehicle.flush()
+
+    print(
+        f"ArduPilot HOME ayarlandi: "
+        f"{home_noktasi['lat']:.8f}, {home_noktasi['lon']:.8f}, Alt={home_alt:.2f}"
+    )
+
+
+def arm_ve_takeoff(vehicle, hedef_yukseklik, home_noktasi=None):  # GUIDED moda geçer, ARM eder ve kalkış yapar
     print(f"{hedef_yukseklik} metre kalkis komutu geldi. Drone ARM ediliyor...")
 
     vehicle.mode = VehicleMode("GUIDED")
@@ -111,11 +140,21 @@ def arm_ve_takeoff(vehicle, hedef_yukseklik):  # GUIDED moda geçer, ARM eder ve
         print("Drone henuz ARM edilemez.")
         time.sleep(1)
 
+    if home_noktasi is not None:
+        ardupilot_home_ayarla(vehicle, home_noktasi)
+        time.sleep(0.5)
+
     vehicle.armed = True
+
+    arm_baslangic_zamani = time.time()
 
     while not vehicle.armed:
         print("ARM olmasi bekleniyor...")
-        vehicle.armed = True
+
+        if time.time() - arm_baslangic_zamani > 30:
+            print("ARM zaman asimina girdi. Drone ARM edilemedi.")
+            return False
+
         time.sleep(1)
 
     print("ARM edildi.")
@@ -137,12 +176,12 @@ def arm_ve_takeoff(vehicle, hedef_yukseklik):  # GUIDED moda geçer, ARM eder ve
             f"ARM: {vehicle.armed}"
         )
 
-        if yukseklik >= hedef_yukseklik * 0.90:
+        if yukseklik >= hedef_yukseklik * 0.80:
             print("Hedef yukseklige yeterince ulasildi...")
             return True
 
         if time.time() - baslangic_zamani > 30:
-            if yukseklik >= hedef_yukseklik * 0.85:
+            if yukseklik >= hedef_yukseklik * 0.75:
                 print("Drone hedef yukseklige yeterince yaklasti. Goreve devam ediliyor...")
                 return True
 
@@ -235,7 +274,7 @@ def hedefe_git(vehicle, hedef_lat, hedef_lon, hedef_yukseklik, hedef_mesafe=1.0,
 
     print(f"Hedef konum: Lat={hedef_lat}, Lon={hedef_lon}, Alt={hedef_yukseklik}")
 
-    vehicle.simple_goto(hedef_konum, groundspeed=NORMAL_HIZ)
+    simpleGotoMavlink(vehicle,hedef_konum, hedef_konum.alt, NORMAL_HIZ)
 
     baslangic_zamani = time.time()
     yavas_mod = False
@@ -251,7 +290,7 @@ def hedefe_git(vehicle, hedef_lat, hedef_lon, hedef_yukseklik, hedef_mesafe=1.0,
 
         if kalan_mesafe <= YAVASLAMA_MESAFESI and not yavas_mod:
             print("Hedefe yaklasildi. Drone yavaslatiliyor...")
-            vehicle.simple_goto(hedef_konum, groundspeed=YAVAS_HIZ)
+            simpleGotoMavlink(vehicle,hedef_konum, hedef_konum.alt, YAVAS_HIZ)
             yavas_mod = True
 
         print(
@@ -285,7 +324,8 @@ def hedef_ustunde_stabil_ol(vehicle, hedef_lat, hedef_lon, hedef_yukseklik, home
         hedef_yukseklik
     )
 
-    vehicle.simple_goto(hedef_konum, groundspeed=YAVAS_HIZ)
+    simpleGotoMavlink(vehicle,hedef_konum, hedef_konum.alt, YAVAS_HIZ)
+
 
     stabil_baslangic = None
     baslangic_zamani = time.time()
@@ -318,7 +358,8 @@ def hedef_ustunde_stabil_ol(vehicle, hedef_lat, hedef_lon, hedef_yukseklik, home
                 return True
         else:
             stabil_baslangic = None
-            vehicle.simple_goto(hedef_konum, groundspeed=YAVAS_HIZ)
+            simpleGotoMavlink(vehicle,hedef_konum , hedef_konum.alt,YAVAS_HIZ)
+
 
         if time.time() - baslangic_zamani > 30:
             print("Stabilizasyon zaman asimina girdi.")
@@ -331,55 +372,30 @@ def hedef_ustunde_stabil_ol(vehicle, hedef_lat, hedef_lon, hedef_yukseklik, home
         time.sleep(0.5)
 
 
-def hiz_komutu_gonder(vehicle, vx, vy, vz):  # MAVLink üzerinden LOCAL_NED hız komutu gönderir
-    msg = vehicle.message_factory.set_position_target_local_ned_encode(
+def wpnav_speed_dn_ayarla(vehicle, hiz_cm_s):  # WPNAV_SPEED_DN iniş hız parametresini ayarlar
+    if hiz_cm_s < 10:
+        hiz_cm_s = 10
+
+    if hiz_cm_s > 500:
+        hiz_cm_s = 500
+
+    print(f"WPNAV_SPEED_DN ayarlaniyor: {hiz_cm_s} cm/s")
+
+    msg = vehicle.message_factory.param_set_encode(
         0,
         0,
-        0,
-        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
-        0b0000111111000111,
-        0,
-        0,
-        0,
-        vx,
-        vy,
-        vz,
-        0,
-        0,
-        0,
-        0,
-        0
+        b"WPNAV_SPEED_DN",
+        float(hiz_cm_s),
+        mavutil.mavlink.MAV_PARAM_TYPE_REAL32
     )
 
     vehicle.send_mavlink(msg)
+    vehicle.flush()
+    time.sleep(0.5)
 
 
-def zorla_disarm(vehicle):  # yerdeyken ayara bağlı olarak MAVLink disarm komutu gönderir
-    if not FORCE_DISARM_AKTIF:
-        print("Force disarm kapali. ArduPilot otomatik disarm bekleniyor...")
-        return
-
-    print("MAVLink DISARM komutu gonderiliyor...")
-
-    msg = vehicle.message_factory.command_long_encode(
-        0,
-        0,
-        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-        0,
-        0,
-        21196,
-        0,
-        0,
-        0,
-        0,
-        0
-    )
-
-    vehicle.send_mavlink(msg)
-
-
-def land_ol(vehicle, zaman_asimi=35):  # GUIDED modda kontrollü hızlı iniş yapar ve son aşamada LAND moduna geçer
-    print("Hizli kontrollu inis basliyor...")
+def land_ol(vehicle, inis_lat, inis_lon, zaman_asimi=40):  # hedef koordinata kademeli iniş yapar ve son aşamada LAND moduna geçer
+    print("Inis basliyor...")
 
     if vehicle.mode.name != "GUIDED":
         vehicle.mode = VehicleMode("GUIDED")
@@ -388,13 +404,23 @@ def land_ol(vehicle, zaman_asimi=35):  # GUIDED modda kontrollü hızlı iniş y
             print("GUIDED mod bekleniyor...")
             time.sleep(0.5)
 
+    if inis_lat is None or inis_lon is None:
+        print("Inis icin hedef konum alinamadi.")
+        return False
+
+    print(f"Inis hedef koordinati: Lat={inis_lat:.8f}, Lon={inis_lon:.8f}")
+
+    print("1 metreye iniliyor...")
+    hedef_1m = LocationGlobalRelative(inis_lat, inis_lon, 1.0)
+    simpleGotoMavlink(vehicle, hedef_1m, hedef_1m.alt, YAVAS_HIZ)
+
     baslangic_zamani = time.time()
 
     while True:
         yukseklik = vehicle.location.global_relative_frame.alt
 
         print(
-            f"Kontrollu inis | "
+            f"Simple_goto inis 1m | "
             f"Yukseklik: {yukseklik:.2f} m | "
             f"ARM: {vehicle.armed} | "
             f"Mod: {vehicle.mode.name}"
@@ -404,25 +430,53 @@ def land_ol(vehicle, zaman_asimi=35):  # GUIDED modda kontrollü hızlı iniş y
             print("Drone zaten DISARM durumda.")
             return True
 
-        if vehicle.mode.name != "GUIDED":
-            print("Drone GUIDED moddan cikti. Kontrollu inis iptal.")
-            return False
-
-        if yukseklik > 2.0:
-            hiz_komutu_gonder(vehicle, 0, 0, 1.4)
-        elif yukseklik > 0.6:
-            hiz_komutu_gonder(vehicle, 0, 0, 0.8)
-        elif yukseklik > 0.12:
-            hiz_komutu_gonder(vehicle, 0, 0, 0.35)
-        else:
-            print("Drone yere cok yaklasti. LAND moduna geciliyor...")
+        if yukseklik <= 1.20:
+            print("1 metre bolgesine ulasildi.")
             break
 
         if time.time() - baslangic_zamani > zaman_asimi:
-            print("Kontrollu inis zaman asimina girdi. LAND moduna geciliyor...")
+            print("1 metreye inis zaman asimina girdi.")
             break
 
-        time.sleep(0.2)
+        if vehicle.mode.name != "GUIDED":
+            print("Drone GUIDED moddan cikti. Inis iptal.")
+            return False
+
+        time.sleep(0.3)
+
+    print("0.2 metreye iniliyor...")
+    hedef_02m = LocationGlobalRelative(inis_lat, inis_lon, 0.2)
+    simpleGotoMavlink(vehicle, hedef_02m, hedef_02m.alt, YAVAS_HIZ)
+
+    ikinci_asama_baslangic = time.time()
+
+    while True:
+        yukseklik = vehicle.location.global_relative_frame.alt
+
+        print(
+            f"Simple_goto inis 0.2m | "
+            f"Yukseklik: {yukseklik:.2f} m | "
+            f"ARM: {vehicle.armed} | "
+            f"Mod: {vehicle.mode.name}"
+        )
+
+        if not vehicle.armed:
+            print("Drone zaten DISARM durumda.")
+            return True
+
+        if yukseklik <= 0.70:
+            print("Drone yere yaklasti. LAND moduna geciliyor...")
+            break
+
+        if time.time() - ikinci_asama_baslangic > 15:
+            print("0.2 metreye inis zaman asimina girdi. LAND moduna geciliyor...")
+            break
+
+        if vehicle.mode.name != "GUIDED":
+            print("Drone GUIDED moddan cikti. Inis iptal.")
+            return False
+
+        time.sleep(0.3)
 
     vehicle.mode = VehicleMode("LAND")
 
@@ -430,15 +484,21 @@ def land_ol(vehicle, zaman_asimi=35):  # GUIDED modda kontrollü hızlı iniş y
         print("LAND mod bekleniyor...")
         time.sleep(0.2)
 
-    sifir_irtifa_baslangic = None
+    yerde_baslangic = None
     land_baslangic = time.time()
+    disarm_gonderildi = False
 
     while True:
         yukseklik = vehicle.location.global_relative_frame.alt
+        hiz = vehicle.groundspeed
+
+        if hiz is None:
+            hiz = 0
 
         print(
             f"LAND son asama | "
             f"Yukseklik: {yukseklik:.2f} m | "
+            f"Hiz: {hiz:.2f} m/s | "
             f"ARM: {vehicle.armed} | "
             f"Mod: {vehicle.mode.name}"
         )
@@ -447,22 +507,23 @@ def land_ol(vehicle, zaman_asimi=35):  # GUIDED modda kontrollü hızlı iniş y
             print("Drone indi ve DISARM oldu.")
             return True
 
-        if yukseklik <= 0.05:
-            if sifir_irtifa_baslangic is None:
-                sifir_irtifa_baslangic = time.time()
+        yerde_gibi = yukseklik <= 0.30 and hiz <= 0.25
 
-            if time.time() - sifir_irtifa_baslangic > 0.6:
-                print("Drone yerde. Hizli DISARM deneniyor...")
-                zorla_disarm(vehicle)
+        if yerde_gibi:
+            if yerde_baslangic is None:
+                yerde_baslangic = time.time()
+
+            if time.time() - yerde_baslangic > 0.8 and not disarm_gonderildi:
+                print("Drone yerde kabul edildi. ArduPilot otomatik DISARM bekleniyor...")
+                disarm_gonderildi = True
         else:
-            sifir_irtifa_baslangic = None
+            yerde_baslangic = None
 
-        if time.time() - land_baslangic > 8:
+        if time.time() - land_baslangic > 20:
             print("LAND son asama zaman asimina girdi.")
             return False
 
         time.sleep(0.2)
-
 
 def inis_sonrasi_bekle(sure, nokta_adi):  # inişten sonra ayarlanan süre kadar yerde bekler
     if sure <= 0:
@@ -491,7 +552,7 @@ def tek_hedef_gorevi(vehicle, hedef, home_noktasi):  # bir hedef için git-in-ka
     print(f"{hedef_isim} gorevi basliyor.")
     print("================================\n")
 
-    if not arm_ve_takeoff(vehicle, HEDEF_YUKSEKLIK):
+    if not arm_ve_takeoff(vehicle, HEDEF_YUKSEKLIK, home_noktasi):
         return gorev_iptal_guvenli_mod(vehicle, "Kalkis basarisiz")
 
     if not hedefe_git(vehicle, hedef_lat, hedef_lon, HEDEF_YUKSEKLIK, HEDEF_MESAFE, home_noktasi=home_noktasi):
@@ -500,13 +561,13 @@ def tek_hedef_gorevi(vehicle, hedef, home_noktasi):  # bir hedef için git-in-ka
     if not hedef_ustunde_stabil_ol(vehicle, hedef_lat, hedef_lon, HEDEF_YUKSEKLIK, home_noktasi=home_noktasi):
         return gorev_iptal_guvenli_mod(vehicle, "Hedef ustunde stabil olunamadi")
 
-    if not land_ol(vehicle):
+    if not land_ol(vehicle, hedef_lat, hedef_lon):
         print("Hedefte inis basarisiz.")
         return False
 
     inis_sonrasi_bekle(INIS_SONRASI_BEKLEME, hedef_isim)
 
-    if not arm_ve_takeoff(vehicle, HEDEF_YUKSEKLIK):
+    if not arm_ve_takeoff(vehicle, HEDEF_YUKSEKLIK, home_noktasi):
         return gorev_iptal_guvenli_mod(vehicle, "Hedeften tekrar kalkis basarisiz")
 
     if not hedefe_git(vehicle, home_lat, home_lon, HEDEF_YUKSEKLIK, HEDEF_MESAFE, home_noktasi=home_noktasi):
@@ -515,7 +576,7 @@ def tek_hedef_gorevi(vehicle, hedef, home_noktasi):  # bir hedef için git-in-ka
     if not hedef_ustunde_stabil_ol(vehicle, home_lat, home_lon, HEDEF_YUKSEKLIK, home_noktasi=home_noktasi):
         return gorev_iptal_guvenli_mod(vehicle, "Home ustunde stabil olunamadi")
 
-    if not land_ol(vehicle):
+    if not land_ol(vehicle, home_lat, home_lon):
         print("Home inisi basarisiz.")
         return False
 
@@ -530,16 +591,57 @@ def tek_hedef_gorevi(vehicle, hedef, home_noktasi):  # bir hedef için git-in-ka
     return True
 
 
+def simpleGotoMavlink(vehicle, hedefKonum, irtifa, hiz=None): 
+    if hiz is not None:
+        vehicle.groundspeed = hiz
+
+    current_heading = vehicle.heading
+
+    if current_heading is None:
+        current_heading = 0
+
+    heading_radians = math.radians(current_heading)
+    
+    print(f"Hedefe yoneliliyor. Mevcut yon sabiti: {current_heading} derece | Hiz: {hiz}")
+
+    msg = vehicle.message_factory.set_position_target_global_int_encode(
+        0,
+        0, 0,
+        mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, 
+        3064,
+        int(hedefKonum.lat * 1e7), 
+        int(hedefKonum.lon * 1e7), 
+        irtifa, 
+        0, 0, 0,
+        0, 0, 0,
+        heading_radians, 
+        0
+    )
+
+    vehicle.send_mavlink(msg)
+    vehicle.flush()
+
 def Gorevler(vehicle):  # tüm görev noktalarını sırayla çalıştırır
     print("Gorevler fonksiyonu basladi.")
-
+    
     if not konum_hazir_mi(vehicle):
         print("Konum hazir degil. Gorev baslatilmadi.")
         return
 
+    HOME_NOKTASI["alt"] = vehicle.location.global_frame.alt
+
+    if HOME_NOKTASI["alt"] is None:
+        print("Home global irtifasi alinamadi. Gorev baslatilmadi.")
+        return
+
+    print(f"Home global irtifasi kaydedildi: {HOME_NOKTASI['alt']:.2f} m")
+
     print("\nHOME NOKTASI")
     print(f"Home Lat: {HOME_NOKTASI['lat']:.8f}")
-    print(f"Home Lon: {HOME_NOKTASI['lon']:.8f}\n")
+    print(f"Home Lon: {HOME_NOKTASI['lon']:.8f}")
+    print(f"Home Alt: {HOME_NOKTASI['alt']:.2f}\n")
+
+    wpnav_speed_dn_ayarla(vehicle, WPNAV_INIS_HIZI)
 
     basarili_gorev_sayisi = 0
 

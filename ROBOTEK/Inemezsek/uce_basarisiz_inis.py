@@ -2,75 +2,57 @@ from dronekit import connect, VehicleMode, LocationGlobalRelative
 import time
 import math
 from pymavlink import mavutil
+import sys
+import termios
+import tty
+import select
 
+BAGLANTI_ADRESI = "tcp:192.168.30.3:5760"   # Gerçek drone bağlantısı
 
-# Bağlantı
-BAGLANTI_ADRESI = "tcp:192.168.30.3:5760"
+# Uçuş ayarları
+HEDEF_YUKSEKLIK = 10          # Kalkış ve seyir irtifası
+HEDEF_MESAFE = 1.2            # Hedefe bu mesafe altında ulaşıldı kabul edilir
+INIS_SONRASI_BEKLEME = 0      # LAND sonrası yerde ekstra bekleme
 
-# Görev genel ayarları
-HEDEF_YUKSEKLIK = 10
-HEDEF_MESAFE = 1.2
-INIS_SONRASI_BEKLEME = 3
+STABIL_MESAFE = 1.2           # Stabil kabul için hedef mesafe eşiği
+STABIL_HIZ = 0.4              # Stabil kabul için hız eşiği
+STABIL_SURE = 2.0             # Şartlar bu süre sağlanırsa stabil kabul edilir
 
-# Stabilizasyon ayarları
-STABIL_MESAFE = 1.2
-STABIL_HIZ = 0.4
-STABIL_SURE = 1.0
+WPNAV_INIS_HIZI = 100         # WPNAV_SPEED_DN, cm/s
 
-# İniş ayarları
-WPNAV_INIS_HIZI = 250
-
-# Failsafe ayarları
-WATCHDOG_AKTIF = True
-RTL_KULLAN = True
-MAKS_HOME_MESAFESI = 80
-MAKS_IRTIFA = 20
-
-YERDE_KABUL_IRTIFA = 0.30
-BEKLEME_BASLAT_IRTIFA = 0.30
+YERDE_KABUL_IRTIFA = 0.55
 YERDE_KABUL_HIZ = 0.35
 YERDE_ONAY_SURESI = 1.0
-ERKEN_ARM_KALAN_SURE = 3.0
 
-# Home noktası
+WATCHDOG_AKTIF = True
+RTL_KULLAN = True
+MAKS_HOME_MESAFESI = 400
+MAKS_IRTIFA = 40
+
+# LAND/DISARM sonrası kullanıcıya karar vermesi için verilecek süre.
+# Bu süre içinde tuş gelmezse normal akış devam eder.
+KOMUT_BEKLEME_SURESI = 5.0
+
 HOME_NOKTASI = {
     "isim": "Home",
-    "lat": 40.74422740,  # 30home
-    "lon": 30.33824900
+    "lat": 40.74403631,
+    "lon": 30.33869061
 }
 
-# Güvenli iniş noktası
-GUVENLI_INIS_NOKTASI = HOME_NOKTASI
-
-# Görev hedefleri
 GOREV_NOKTALARI = [
-    {
-        "isim": "Hedef_1",  # 40sağ
-        "lat": 40.74432020,
-        "lon": 30.33822430
-    },
-    {
-        "isim": "Hedef_2",  # 50orta
-        "lat": 40.74439260,
-        "lon": 30.33819570
-    },
-    {
-        "isim": "Hedef_3",  # 40sol
-        "lat": 40.74447810,
-        "lon": 30.33816500
-    },
-    {
-        "isim": "Hedef_4",  # 30sol
-        "lat": 40.74455790,
-        "lon": 30.33814620
-    }
+    {"isim": "Hedef_3", "lat": 40.74453955, "lon": 30.33866349},
+    {"isim": "Hedef_4", "lat": 40.74467783, "lon": 30.33840338},
+    {"isim": "Hedef_1", "lat": 40.74421326, "lon": 30.33874879},
+    {"isim": "Hedef_2", "lat": 40.74434805, "lon": 30.33848807},
 ]
 
 
 def mesafe_hesapla_metre(konum1, konum2):
+    if konum1.lat is None or konum1.lon is None or konum2.lat is None or konum2.lon is None:
+        return float("inf")
+
     dlat = konum2.lat - konum1.lat
     dlon = konum2.lon - konum1.lon
-
     ortalama_lat = math.radians((konum1.lat + konum2.lat) / 2)
 
     metre_lat = dlat * 111320
@@ -81,7 +63,6 @@ def mesafe_hesapla_metre(konum1, konum2):
 
 def konum_hazir_mi(vehicle):
     print("GPS ve EKF kontrol ediliyor...")
-
     baslangic_zamani = time.time()
 
     while True:
@@ -155,12 +136,14 @@ def arm_ve_takeoff(vehicle, hedef_yukseklik, home_noktasi=None):
         time.sleep(0.5)
 
     if not vehicle.armed:
+        # LAND sonrası hemen tekrar kalkışta ArduPilot'un landed state'i toparlaması için kısa bekleme.
+        time.sleep(1.0)
+
         while not vehicle.is_armable:
             print("Drone henuz ARM edilemez.")
             time.sleep(1)
 
         vehicle.armed = True
-
         arm_baslangic_zamani = time.time()
 
         while not vehicle.armed:
@@ -194,6 +177,10 @@ def arm_ve_takeoff(vehicle, hedef_yukseklik, home_noktasi=None):
             f"ARM: {vehicle.armed}"
         )
 
+        if not vehicle.armed:
+            print("Takeoff sirasinda drone DISARM oldu.")
+            return False
+
         if yukseklik >= hedef_yukseklik * 0.90:
             print("Hedef yukseklige yeterince ulasildi...")
             return True
@@ -215,17 +202,15 @@ def failsafe_durum_kontrol(vehicle, home_noktasi):
 
     mevcut = vehicle.location.global_relative_frame
 
-    if vehicle.mode.name not in ["GUIDED", "LAND", "RTL"]:
-        return False, f"Beklenmeyen mod: {vehicle.mode.name}"
-
     if mevcut.lat is None or mevcut.lon is None:
-        return False, "GPS konumu yok"
+        print("UYARI: GPS konumu yok | Goreve devam ediliyor.")
+        return True, "GPS konumu yok ama devam"
 
     if vehicle.gps_0.fix_type is not None and vehicle.gps_0.fix_type < 3:
-        return False, f"GPS fix zayif: {vehicle.gps_0.fix_type}"
+        print(f"UYARI: GPS fix zayif: {vehicle.gps_0.fix_type} | Goreve devam ediliyor.")
 
     if not vehicle.ekf_ok:
-        return False, "EKF sagliksiz"
+        print("UYARI: EKF sagliksiz gorunuyor | Goreve devam ediliyor.")
 
     if mevcut.alt > MAKS_IRTIFA:
         return False, f"Irtifa limiti asildi: {mevcut.alt:.2f} m"
@@ -256,19 +241,6 @@ def failsafe_uygula(vehicle, sebep):
     return False
 
 
-def gorev_iptal_guvenli_mod(vehicle, sebep):
-    print(f"Gorev iptal edildi: {sebep}")
-
-    if not vehicle.armed:
-        return False
-
-    if vehicle.mode.name in ["RTL", "LAND"]:
-        print(f"Drone zaten guvenli modda: {vehicle.mode.name}")
-        return False
-
-    return failsafe_uygula(vehicle, sebep)
-
-
 def hedefe_git(vehicle, hedef_lat, hedef_lon, hedef_yukseklik, hedef_mesafe=1.0, zaman_asimi=60, home_noktasi=None):
     print("Hedefe gitme komutu geldi...")
 
@@ -280,11 +252,7 @@ def hedefe_git(vehicle, hedef_lat, hedef_lon, hedef_yukseklik, hedef_mesafe=1.0,
             print("GUIDED mod bekleniyor...")
             time.sleep(1)
 
-    hedef_konum = LocationGlobalRelative(
-        hedef_lat,
-        hedef_lon,
-        hedef_yukseklik
-    )
+    hedef_konum = LocationGlobalRelative(hedef_lat, hedef_lon, hedef_yukseklik)
 
     print(f"Hedef konum: Lat={hedef_lat}, Lon={hedef_lon}, Alt={hedef_yukseklik}")
 
@@ -295,6 +263,12 @@ def hedefe_git(vehicle, hedef_lat, hedef_lon, hedef_yukseklik, hedef_mesafe=1.0,
 
     while True:
         mevcut_konum = vehicle.location.global_relative_frame
+
+        if mevcut_konum.lat is None or mevcut_konum.lon is None:
+            print("UYARI: Hedefe giderken GPS konumu yok. Sonraki olcum bekleniyor.")
+            time.sleep(1)
+            continue
+
         kalan_mesafe = mesafe_hesapla_metre(mevcut_konum, hedef_konum)
 
         if home_noktasi is not None:
@@ -331,12 +305,7 @@ def hedefe_git(vehicle, hedef_lat, hedef_lon, hedef_yukseklik, hedef_mesafe=1.0,
 def hedef_ustunde_stabil_ol(vehicle, hedef_lat, hedef_lon, hedef_yukseklik, home_noktasi=None):
     print("Hedef ustunde stabilizasyon basladi...")
 
-    hedef_konum = LocationGlobalRelative(
-        hedef_lat,
-        hedef_lon,
-        hedef_yukseklik
-    )
-
+    hedef_konum = LocationGlobalRelative(hedef_lat, hedef_lon, hedef_yukseklik)
     simpleGotoMavlink(vehicle, hedef_konum, hedef_konum.alt)
 
     stabil_baslangic = None
@@ -344,6 +313,12 @@ def hedef_ustunde_stabil_ol(vehicle, hedef_lat, hedef_lon, hedef_yukseklik, home
 
     while True:
         mevcut_konum = vehicle.location.global_relative_frame
+
+        if mevcut_konum.lat is None or mevcut_konum.lon is None:
+            print("UYARI: Stabilizasyonda GPS konumu yok. Sonraki olcum bekleniyor.")
+            time.sleep(0.5)
+            continue
+
         kalan_mesafe = mesafe_hesapla_metre(mevcut_konum, hedef_konum)
 
         if home_noktasi is not None:
@@ -405,104 +380,27 @@ def wpnav_speed_dn_ayarla(vehicle, hiz_cm_s):
     time.sleep(0.5)
 
 
-def land_ol(vehicle, inis_lat, inis_lon, bekleme_suresi=0, disarm_bekle=False, erken_arm=False, zaman_asimi=40):
-    print("Inis basliyor...")
-
-    if vehicle.mode.name != "GUIDED":
-        vehicle.mode = VehicleMode("GUIDED")
-
-        while vehicle.mode.name != "GUIDED":
-            print("GUIDED mod bekleniyor...")
-            time.sleep(0.5)
-
-    if inis_lat is None or inis_lon is None:
-        print("Inis icin hedef konum alinamadi.")
-        return False, 0
-
-    print(f"Inis hedef koordinati: Lat={inis_lat:.8f}, Lon={inis_lon:.8f}")
-
-    print("1 metreye iniliyor...")
-    hedef_1m = LocationGlobalRelative(inis_lat, inis_lon, 1.0)
-    simpleGotoMavlink(vehicle, hedef_1m, hedef_1m.alt)
-
-    baslangic_zamani = time.time()
-
-    while True:
-        yukseklik = vehicle.location.global_relative_frame.alt
-
-        print(
-            f"Simple_goto inis 1m | "
-            f"Yukseklik: {yukseklik:.2f} m | "
-            f"ARM: {vehicle.armed} | "
-            f"Mod: {vehicle.mode.name}"
-        )
-
-        if not vehicle.armed:
-            print("Drone zaten DISARM durumda.")
-            return True, 0
-
-        if yukseklik <= 1.20:
-            print("1 metre bolgesine ulasildi.")
-            break
-
-        if time.time() - baslangic_zamani > zaman_asimi:
-            print("1 metreye inis zaman asimina girdi.")
-            break
-
-        if vehicle.mode.name != "GUIDED":
-            print("Drone GUIDED moddan cikti. Inis iptal.")
-            return False, 0
-
-        time.sleep(0.3)
-
-    print("0.5 metre civarinda LAND gecisi hazirlaniyor...")
-    hedef_yakin = LocationGlobalRelative(inis_lat, inis_lon, 0.50)
-    simpleGotoMavlink(vehicle, hedef_yakin, hedef_yakin.alt)
-
-    ikinci_asama_baslangic = time.time()
-
-    while True:
-        yukseklik = vehicle.location.global_relative_frame.alt
-
-        print(
-            f"Simple_goto inis 0.5m | "
-            f"Yukseklik: {yukseklik:.2f} m | "
-            f"ARM: {vehicle.armed} | "
-            f"Mod: {vehicle.mode.name}"
-        )
-
-        if not vehicle.armed:
-            print("Drone zaten DISARM durumda.")
-            return True, 0
-
-        if yukseklik <= 0.60:
-            print("Drone yere yaklasti. LAND moduna geciliyor...")
-            break
-
-        if time.time() - ikinci_asama_baslangic > 15:
-            print("0.5 metreye inis zaman asimina girdi. LAND moduna geciliyor...")
-            break
-
-        if vehicle.mode.name != "GUIDED":
-            print("Drone GUIDED moddan cikti. Inis iptal.")
-            return False, 0
-
-        time.sleep(0.3)
+def land_ol(vehicle, bekleme_suresi=0, zaman_asimi=90):
+    print("Direkt LAND inisi basliyor...")
+    print("GUIDED ile alcalma yok. Direkt LAND moduna geciliyor...")
 
     vehicle.mode = VehicleMode("LAND")
 
+    land_mod_baslangic = time.time()
+
     while vehicle.mode.name != "LAND":
         print("LAND mod bekleniyor...")
+
+        if time.time() - land_mod_baslangic > 5:
+            print("LAND moda gecilemedi.")
+            return False
+
         time.sleep(0.2)
 
     yerde_aday_baslangic = None
     bekleme_baslangic = None
     land_baslangic = time.time()
-    disarm_bekleme_suresi = 0
-    disarm_yazildi = False
     arm_bekleme_mesaji_yazildi = False
-    erken_arm_tamamlandi = False
-    erken_arm_son_deneme = 0
 
     while True:
         yukseklik = vehicle.location.global_relative_frame.alt
@@ -512,12 +410,16 @@ def land_ol(vehicle, inis_lat, inis_lon, bekleme_suresi=0, disarm_bekle=False, e
             hiz = 0
 
         print(
-            f"LAND son asama | "
+            f"LAND | "
             f"Yukseklik: {yukseklik:.2f} m | "
             f"Hiz: {hiz:.2f} m/s | "
             f"ARM: {vehicle.armed} | "
             f"Mod: {vehicle.mode.name}"
         )
+
+        if not vehicle.armed:
+            print("Drone DISARM oldu. Inis tamamlandi.")
+            return True
 
         yerde_gibi = yukseklik <= YERDE_KABUL_IRTIFA and hiz <= YERDE_KABUL_HIZ
 
@@ -528,65 +430,15 @@ def land_ol(vehicle, inis_lat, inis_lon, bekleme_suresi=0, disarm_bekle=False, e
 
             yerde_aday_suresi = time.time() - yerde_aday_baslangic
 
-            bekleme_baslat_sarti = (
-                yerde_aday_suresi >= YERDE_ONAY_SURESI and
-                (
-                    yukseklik <= BEKLEME_BASLAT_IRTIFA or
-                    not vehicle.armed
-                )
-            )
-
-            if bekleme_baslat_sarti and bekleme_baslangic is None:
+            if yerde_aday_suresi >= YERDE_ONAY_SURESI and bekleme_baslangic is None:
                 bekleme_baslangic = time.time()
                 print("Bekleme sayaci basladi.")
 
-            if not vehicle.armed and not disarm_yazildi:
-                disarm_bekleme_suresi = time.time() - yerde_aday_baslangic
-                print(
-                    f"Drone DISARM oldu. "
-                    f"Yerde kabulden disarm'a kadar gecen sure: {disarm_bekleme_suresi:.2f} sn"
-                )
-                disarm_yazildi = True
-
             if bekleme_baslangic is not None:
                 yerde_gecen_sure = time.time() - bekleme_baslangic
-                kalan_bekleme_suresi = bekleme_suresi - yerde_gecen_sure
-
-                if (
-                    erken_arm and
-                    not disarm_bekle and
-                    bekleme_suresi > 0 and
-                    not vehicle.armed and
-                    not erken_arm_tamamlandi and
-                    kalan_bekleme_suresi <= ERKEN_ARM_KALAN_SURE and
-                    time.time() - erken_arm_son_deneme >= 1.0
-                ):
-                    erken_arm_son_deneme = time.time()
-
-                    print("Bekleme bitmeden tekrar ARM hazirligi basliyor...")
-
-                    if vehicle.mode.name != "GUIDED":
-                        vehicle.mode = VehicleMode("GUIDED")
-                        time.sleep(0.5)
-
-                    if vehicle.is_armable:
-                        vehicle.armed = True
-                        arm_baslangic_zamani = time.time()
-
-                        while not vehicle.armed and time.time() - arm_baslangic_zamani < ERKEN_ARM_KALAN_SURE:
-                            print("Bekleme suresi icinde ARM olmasi bekleniyor...")
-                            time.sleep(0.2)
-
-                        if vehicle.armed:
-                            print("Bekleme suresi icinde tekrar ARM edildi.")
-                            erken_arm_tamamlandi = True
-                        else:
-                            print("Bekleme suresi icinde ARM tamamlanamadi.")
-                    else:
-                        print("Drone erken ARM icin armable degil.")
 
                 if yerde_gecen_sure >= bekleme_suresi:
-                    if vehicle.armed and disarm_bekle:
+                    if vehicle.armed:
                         if not arm_bekleme_mesaji_yazildi:
                             print(
                                 "Yerde bekleme tamamlandi ama drone hala ARM durumda. "
@@ -594,95 +446,18 @@ def land_ol(vehicle, inis_lat, inis_lon, bekleme_suresi=0, disarm_bekle=False, e
                             )
                             arm_bekleme_mesaji_yazildi = True
                     else:
-                        if vehicle.armed and not disarm_bekle:
-                            vehicle.mode = VehicleMode("GUIDED")
-                            print("Bekleme tamamlandi. Drone ARM durumda, kalkis akisina geciliyor...")
-
-                        print(
-                            f"Inis ve yerde bekleme tamamlandi. "
-                            f"Istenen bekleme: {bekleme_suresi:.2f} sn | "
-                            f"Yerde gecen sure: {yerde_gecen_sure:.2f} sn | "
-                            f"ARM: {vehicle.armed}"
-                        )
-                        return True, disarm_bekleme_suresi
-
+                        print("Inis ve yerde bekleme tamamlandi.")
+                        return True
         else:
             yerde_aday_baslangic = None
             bekleme_baslangic = None
             arm_bekleme_mesaji_yazildi = False
 
-        if time.time() - land_baslangic > zaman_asimi + bekleme_suresi + 15:
-            print("LAND son asama zaman asimina girdi.")
-            return False, disarm_bekleme_suresi
+        if time.time() - land_baslangic > zaman_asimi + bekleme_suresi:
+            print("LAND zaman asimina girdi.")
+            return False
 
         time.sleep(0.2)
-
-
-def tek_hedef_gorevi(vehicle, hedef, home_noktasi):
-    baslangic_zamani = time.time()
-
-    hedef_isim = hedef["isim"]
-    hedef_lat = hedef["lat"]
-    hedef_lon = hedef["lon"]
-
-    home_lat = home_noktasi["lat"]
-    home_lon = home_noktasi["lon"]
-
-    print("\n================================")
-    print(f"{hedef_isim} gorevi basliyor.")
-    print("================================\n")
-
-    if not arm_ve_takeoff(vehicle, HEDEF_YUKSEKLIK, home_noktasi):
-        return gorev_iptal_guvenli_mod(vehicle, "Kalkis basarisiz")
-
-    if not hedefe_git(vehicle, hedef_lat, hedef_lon, HEDEF_YUKSEKLIK, HEDEF_MESAFE, home_noktasi=home_noktasi):
-        return gorev_iptal_guvenli_mod(vehicle, "Hedefe gidilemedi")
-
-    if not hedef_ustunde_stabil_ol(vehicle, hedef_lat, hedef_lon, HEDEF_YUKSEKLIK, home_noktasi=home_noktasi):
-        return gorev_iptal_guvenli_mod(vehicle, "Hedef ustunde stabil olunamadi")
-
-    inis_sonuc, disarm_bekleme_suresi = land_ol(
-        vehicle,
-        hedef_lat,
-        hedef_lon,
-        bekleme_suresi=INIS_SONRASI_BEKLEME,
-        disarm_bekle=True,
-        erken_arm=False
-    )
-
-    if not inis_sonuc:
-        print("Hedefte inis basarisiz.")
-        return False
-
-    if not arm_ve_takeoff(vehicle, HEDEF_YUKSEKLIK, home_noktasi):
-        return gorev_iptal_guvenli_mod(vehicle, "Hedeften tekrar kalkis basarisiz")
-
-    if not hedefe_git(vehicle, home_lat, home_lon, HEDEF_YUKSEKLIK, HEDEF_MESAFE, home_noktasi=home_noktasi):
-        return gorev_iptal_guvenli_mod(vehicle, "Home noktasina donulemedi")
-
-    if not hedef_ustunde_stabil_ol(vehicle, home_lat, home_lon, HEDEF_YUKSEKLIK, home_noktasi=home_noktasi):
-        return gorev_iptal_guvenli_mod(vehicle, "Home ustunde stabil olunamadi")
-
-    inis_sonuc, disarm_bekleme_suresi = land_ol(
-        vehicle,
-        home_lat,
-        home_lon,
-        bekleme_suresi=0,
-        disarm_bekle=True,
-        erken_arm=False
-    )
-
-    if not inis_sonuc:
-        print("Home inisi basarisiz.")
-        return False
-
-    bitis_zamani = time.time()
-    gorev_suresi = bitis_zamani - baslangic_zamani
-
-    print(f"{hedef_isim} gorevi tamamlandi.")
-    print(f"Gorev {gorev_suresi:.2f} saniye surdu.")
-
-    return True
 
 
 def simpleGotoMavlink(vehicle, hedefKonum, irtifa):
@@ -718,8 +493,116 @@ def simpleGotoMavlink(vehicle, hedefKonum, irtifa):
     vehicle.flush()
 
 
+def b_tusu_bekle():
+    print("\n================================")
+    print(">> b tusu bekleniyor...")
+    print(">> Gorevi baslatmak icin terminalde b tusuna bas")
+    print("================================\n")
+
+    fd = sys.stdin.fileno()
+    eski_ayar = termios.tcgetattr(fd)
+
+    try:
+        tty.setcbreak(fd)
+
+        while True:
+            tus = sys.stdin.read(1).lower()
+
+            if tus == "b":
+                print("\n>> b tusu algilandi.")
+                print(">> Gorev baslatiliyor...\n")
+                return
+
+            else:
+                print(">> Sadece b tusuna basinca gorev baslar.")
+
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, eski_ayar)
+
+
+def sureli_tus_kontrolu(izinli_tuslar, sure_saniye):
+    """
+    Belirlenen süre içinde r/h gelirse döndürür.
+    Tuş gelmezse None döner ve normal akış devam eder.
+    """
+    print("\n--------------------------------")
+    print(f"Komut penceresi: {sure_saniye:.1f} sn")
+    print("r = ayni HEDEF konumuna tekrar git")
+    print("h = HOME konumuna git / HOME'u tekrar dene")
+    print("Tusa basmazsan normal akis devam eder.")
+    print("--------------------------------\n")
+
+    fd = sys.stdin.fileno()
+    eski_ayar = termios.tcgetattr(fd)
+    baslangic = time.time()
+
+    try:
+        tty.setcbreak(fd)
+
+        while time.time() - baslangic < sure_saniye:
+            kalan = sure_saniye - (time.time() - baslangic)
+            print(f"Komut bekleniyor... kalan: {kalan:.1f} sn", end="\r")
+
+            okunabilir, _, _ = select.select([sys.stdin], [], [], 0.1)
+
+            if okunabilir:
+                tus = sys.stdin.read(1).lower()
+
+                if tus in izinli_tuslar:
+                    print(f"\nKomut alindi: {tus}\n")
+                    return tus
+
+                print(f"\nGecersiz tus: {tus}. Sadece {izinli_tuslar}\n")
+
+        print("\nKomut gelmedi. Normal akis devam ediyor.\n")
+        return None
+
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, eski_ayar)
+
+
+def konuma_git_ve_land(vehicle, nokta, home_noktasi):
+    print("\n================================")
+    print(f"{nokta['isim']} denemesi basliyor.")
+    print("================================\n")
+
+    if not arm_ve_takeoff(vehicle, HEDEF_YUKSEKLIK, home_noktasi):
+        print(f"{nokta['isim']} icin kalkis basarisiz.")
+        return False
+
+    if not hedefe_git(
+        vehicle,
+        nokta["lat"],
+        nokta["lon"],
+        HEDEF_YUKSEKLIK,
+        HEDEF_MESAFE,
+        home_noktasi=home_noktasi
+    ):
+        print(f"{nokta['isim']} konumuna gidilemedi.")
+        return False
+
+    if not hedef_ustunde_stabil_ol(
+        vehicle,
+        nokta["lat"],
+        nokta["lon"],
+        HEDEF_YUKSEKLIK,
+        home_noktasi=home_noktasi
+    ):
+        print(f"{nokta['isim']} ustunde stabil olunamadi.")
+        return False
+
+    if not land_ol(vehicle, bekleme_suresi=INIS_SONRASI_BEKLEME):
+        print(f"{nokta['isim']} LAND basarisiz.")
+        return False
+
+    print(f"{nokta['isim']} LAND tamamlandi.")
+    return True
+
+
 def Gorevler(vehicle):
     print("Gorevler fonksiyonu basladi.")
+
+    genel_baslangic_zamani = time.time()
 
     if not konum_hazir_mi(vehicle):
         print("Konum hazir degil. Gorev baslatilmadi.")
@@ -740,21 +623,66 @@ def Gorevler(vehicle):
 
     wpnav_speed_dn_ayarla(vehicle, WPNAV_INIS_HIZI)
 
-    basarili_gorev_sayisi = 0
+    basarili_hedef_sayisi = 0
 
     for hedef in GOREV_NOKTALARI:
-        sonuc = tek_hedef_gorevi(vehicle, hedef, HOME_NOKTASI)
+        durum = "HEDEF"  # HEDEF -> HOME -> siradaki hedef
 
-        if sonuc:
-            basarili_gorev_sayisi += 1
-            print(f"Basarili gorev sayisi: {basarili_gorev_sayisi}")
-        else:
-            print("Bir hedef gorevi basarisiz oldu. Gorev dongusu durduruluyor.")
-            break
+        while True:
+            if durum == "HEDEF":
+                sonuc = konuma_git_ve_land(vehicle, hedef, HOME_NOKTASI)
+
+                if not sonuc:
+                    print("Hedef denemesi basarisiz oldu. Gorev durduruluyor.")
+                    return
+
+                tus = sureli_tus_kontrolu(["r", "h"], KOMUT_BEKLEME_SURESI)
+
+                if tus == "r":
+                    print(f"Operator komutu: {hedef['isim']} yanlis/eksik. Ayni hedef tekrar deneniyor.")
+                    durum = "HEDEF"
+                    continue
+
+                if tus == "h":
+                    print("Operator komutu: HOME'a gidiliyor.")
+                    durum = "HOME"
+                    continue
+
+                print("Komut yok: normal akis geregi HOME'a gidiliyor.")
+                durum = "HOME"
+                continue
+
+            if durum == "HOME":
+                sonuc = konuma_git_ve_land(vehicle, HOME_NOKTASI, HOME_NOKTASI)
+
+                if not sonuc:
+                    print("HOME denemesi basarisiz oldu. Gorev durduruluyor.")
+                    return
+
+                tus = sureli_tus_kontrolu(["r", "h"], KOMUT_BEKLEME_SURESI)
+
+                if tus == "h":
+                    print("Operator komutu: HOME yanlis/eksik. HOME tekrar deneniyor.")
+                    durum = "HOME"
+                    continue
+
+                if tus == "r":
+                    print(f"Operator komutu: {hedef['isim']} tekrar deneniyor.")
+                    durum = "HEDEF"
+                    continue
+
+                print("Komut yok: normal akis geregi siradaki hedefe geciliyor.")
+                basarili_hedef_sayisi += 1
+                print(f"Tamamlanan hedef sayisi: {basarili_hedef_sayisi}")
+                break
+
+    genel_bitis_zamani = time.time()
+    toplam_gorev_suresi = genel_bitis_zamani - genel_baslangic_zamani
 
     print("\n================================")
     print("TUM GOREV AKISI BITTI")
-    print(f"Toplam basarili hedef: {basarili_gorev_sayisi}")
+    print(f"Toplam tamamlanan hedef: {basarili_hedef_sayisi}")
+    print(f"Genel gorev suresi: {toplam_gorev_suresi:.2f} saniye")
     print("================================\n")
 
 
@@ -770,13 +698,13 @@ if __name__ == "__main__":
     print("Konum:", vehicle.location.global_relative_frame)
 
     try:
-        Gorevler(vehicle)
+        b_tusu_bekle()
+        for i in range(3):
+            Gorevler(vehicle)
 
     except KeyboardInterrupt:
         print("Kullanici tarafindan durduruldu.")
-        if vehicle.armed:
-            print("Drone LAND moduna aliniyor...")
-            vehicle.mode = VehicleMode("LAND")
+        print("Mevcut moda dokunulmuyor.")
 
     finally:
         print("Vehicle kapatiliyor...")

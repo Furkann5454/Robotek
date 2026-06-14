@@ -5,7 +5,7 @@ import sys
 BAGLANTI_ADRESI = sys.argv[1] if len(sys.argv) > 1 else "tcp:192.168.30.3:5760"
 BAUD = int(sys.argv[2]) if len(sys.argv) > 2 else None
 
-ORNEK_SAYISI = 1
+ORNEK_SAYISI = 20
 ORNEK_ARALIGI = 0.2
 
 
